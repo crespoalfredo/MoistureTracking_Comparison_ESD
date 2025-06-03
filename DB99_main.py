@@ -9,12 +9,13 @@ import xarray as xr
 import datetime
 from numba import jit
 import configparser
-from SOD08_functions import *
+from DB99_functions import *
 
 try:
     namelist = sys.argv[1]
 except:
     namelist = 'namelists_SOD08/namelist_NoABL'
+
 
 # Command line arguments
 config = configparser.ConfigParser()
@@ -22,14 +23,10 @@ config.read(namelist)
 release_date = config['DATES']['release_date']
 model = config['OPTIONS']['model']
 dt = int(config['OPTIONS']['dt'])
-dq_evap = float(config['OPTIONS']['dq_evap'])
-dq_prec = float(config['OPTIONS']['dq_prec'])
 rh_prec = float(config['OPTIONS']['rh_prec'])
-rh_disc = float(config['OPTIONS']['rh_disc'])
+z_prec = float(config['OPTIONS']['z_prec'])
 dx = float(config['OPTIONS']['dx'])
 dy = float(config['OPTIONS']['dy'])
-abl = int(config['OPTIONS']['abl'])
-abl_factor = float(config['OPTIONS']['abl_factor'])
 path_traj = config['PATHS']['path_traj']
 path_data = config['PATHS']['path_otherdata']
 path_out = config['PATHS']['path_out']
@@ -46,54 +43,32 @@ q = q[times,:]; RH = RH[times,:]
 z = z[times,:]; h_abl = h_abl[times,:]
 
 # Compute the indices corresponding to the mid point parcel positions
-x_ind, y_ind = compute_midpoints(x, y, dx, dy)
+x_ind, y_ind = compute_endpoints(x, y, dx, dy)
+
+# Interpolate total column water and evaporation to parcel position, precipitation only for the last time step
+tcw, evap, tp = interpol_tcw_evap_complete(path_data, release_date, x, y, dx, dy)
 
 # Select parcels contributing to precipitation
-dq_end = q[1,:]-q[0,:]
-RH_mean = 0.5*(RH[0,:]+RH[1,:])
-ind_rain = np.where((RH_mean>rh_prec)&(dq_end>dq_prec))[0]
+ind_rain = np.where((RH[0,:]>rh_prec)&(z[0,:]>z_prec))[0]
 x = x[:, ind_rain]
 x_ind = x_ind[:, ind_rain]; y_ind = y_ind[:, ind_rain]
 q = q[:, ind_rain]; RH = RH[:, ind_rain]
 z = z[:, ind_rain]; h_abl = h_abl[:, ind_rain]
+tcw = tcw[:, ind_rain]; evap = evap[:, ind_rain]; tp = tp[ind_rain]
 ntimes, numpart = q.shape
 
-# Find those times where the parcel gains and loses water
-dq = q[:-1,:]-q[1:,:]
-z_mean = 0.5*z[:-1,:]+0.5*z[1:,:]
-h_abl_mean = 0.5*h_abl[:-1,:]+0.5*h_abl[1:,:]
-ind_prec = (dq<dq_prec)&(RH[1:,:]>rh_disc)
-if abl==1:
-    ind_evap = (dq>dq_evap*0.001)&(z_mean<abl_factor*h_abl_mean)
-else:
-    ind_evap = (dq>dq_evap*0.001)
-
-# Correct dq when trajectories come from FLEXPART-WRF
-if model=='WRF':
-    time_correct = (x==-1000.0).argmax(axis=0)
-    part_correct = np.where(time_correct>0)[0]
-    time_correct = time_correct[part_correct]
-    dq[time_correct-1, part_correct] = q[time_correct-1, part_correct]
-
 # Discounting routine
-f = discount_sod08(dq, q, ind_evap, ind_prec)
+f = q*mass*discount_db99(tcw, evap)
 
-# Upscale to the total humidity before precipitation occurs
-f = f*q[1,:].sum()*mass/f.sum()
-
-# Take the fraction represented by the water lost in the last step
-f = -f*dq[0,:]/q[1,:]
+# Consider precipitation and precipitable water per grid cell (precipitation is assumed to be in mm)
+f = f*997.0*tp/(tcw[0,:]*1000.0)
 
 # Now compute the spatial distribution of the preciptiation sources
 ms, ms_north, ms_south = compute_ms_field(x_ind, y_ind, f, dx, dy)
 
 # Finally, write the results to a netcdf dataset
 ds = get_results(release_date, ms, ms_north, ms_south)
-dq_evap = str(dq_evap).replace('.', '')
-rh_disc = str(int(rh_disc)).replace('.', '')
-if abl==1:
-    filename_out = path_out+'ms_sod08ABL-{}_dt{}-dq{}-rh{}_{}.nc'.format(model, dt, dq_evap, rh_disc, release_date)
-else:
-    filename_out = path_out+'ms_sod08-{}_dt{}-dq{}-rh{}_{}.nc'.format(model, dt, dq_evap, rh_disc, release_date)    
-
+z_prec = str(int(z_prec)).replace('.', '')
+rh_prec = str(int(rh_prec)).replace('.', '')
+filename_out = path_out+'ms_db99-{}_z0{}-rh{}_{}.nc'.format(model, z_prec, rh_prec, release_date)
 ds.to_netcdf(filename_out)

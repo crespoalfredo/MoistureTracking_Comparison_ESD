@@ -1,0 +1,16 @@
+[DATES]
+release_date=1987101400
+
+[OPTIONS]
+model=WRF
+dt=1
+rh_prec=80.
+z_prec=0.
+dx=0.25
+dy=0.25
+
+[PATHS]
+path_traj=/home/usc/fp/aco/lustre/JOBS/SIMS_FLEXPART-WRF/SIM_AR198710_FLEXWRF/TRAJDATA/
+path_otherdata=/home/usc/fp/aco/lustre/JOBS/SIMS_FLEXPART-WRF/SIM_AR198710_FLEXWRF/DATA
+path_out=nc/
+prefix_traj=new_traj

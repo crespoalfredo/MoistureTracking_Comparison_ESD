@@ -31,54 +31,111 @@ def read_trajdata(filename):
     return x, y, z, h_abl, q, RH, mass
 
 
-# --- FUNCTION compute_midpoints
-# It computes the indices associated to the mid point on the surface of the Earth (height is not considered)
-def compute_midpoints(x, y, dx, dy):
+# --- FUNCTION interpol_tcw_evap
+# It interpolates total column and evaporation to the parcel positions
+# It also interpolates total precipitation to the final parcel position
+def interpol_tcw_evap_complete(data_path, release_date, x, y, dx, dy):
+
+    ntimes, numpart = x.shape
+
+    # Open the netCDF datasets for reading evaporation and precipitable water data
+    tcw_ds = xr.open_dataset(data_path+'/tcw.nc', engine='netcdf4')
+    evap_ds = xr.open_dataset(data_path+'/evap.nc', engine='netcdf4')
+
+    # Handle times
+    t_rel = datetime.datetime.strptime(release_date, '%Y%m%d%H')
+    t_beg = t_rel-datetime.timedelta(hours=ntimes)
+
+    # Take arrays
+    evap_arr = evap_ds.sel(time=slice(t_beg, t_rel)).e.values
+    evap_arr = np.where(evap_arr>0, 0.0, -evap_arr)
+    tcw_arr = tcw_ds.sel(time=slice(t_beg, t_rel)).tcw.values
+    tcw_ds.close()
+    evap_ds.close()
+
+    tcw, evap = compute_tcw_evap(x, y, tcw_arr, evap_arr, dx, dy)
+    tcw = np.where(x==-1000.0, 0.0, tcw)
+    evap = np.where(x==-1000.0, 0.0, evap)
+
+    # Finally, handle precipitation data
+    x0_ind = np.round(x[0,:]/dx).astype(np.int32)
+    y0_ind = np.round((-y[0,:]+90.0)/dy).astype(np.int32)
+    tp_ds = xr.open_dataset(data_path+'/rain.nc', engine='netcdf4')
+    tp_ds_arr = tp_ds.sel(Time=t_rel).rain.values
+    tp = tp_ds_arr[y0_ind, x0_ind]
+
+    return tcw, evap, tp
+
+# --- FUNCTION compute_tcw_evap
+# Adaptation of the previous function (interpol_tcw_evap) to be performed with numba
+# Recall that ERA5 data is given in the box 90>=lat>=-90, 0<=lon<=360
+@jit(nopython=True)
+def compute_tcw_evap(x, y, tcw_arr, evap_arr, dx, dy):
+
+    ntimes, numpart = x.shape
+    nx = int(360/dx)
+    ny = int(180/dy)+1
+
+    x_ind = np.round_(x/dx).astype(np.int32)
+    y_ind = np.round_((-y+90.0)/dy).astype(np.int32)
+    tcw = np.zeros((ntimes, numpart))
+    evap = np.zeros((ntimes, numpart))
+
+    for t in range(ntimes):
+        for j in range(numpart):
+            tcw[t,j] = tcw_arr[-1-t, y_ind[t,j], x_ind[t,j]]
+            evap[t,j] = evap_arr[-1-t, y_ind[t,j], x_ind[t,j]]
+
+    return tcw, evap
+
+
+# --- FUNCTION compute_endpoints
+# It computes the indices associated to the end point on the surface of the Earth (height is not considered)
+def compute_endpoints(x, y, dx, dy):
 
     nx = int(360/dx)
     ny = int(180/dy)+1
-    
-    xmidp = 0.5*np.cos(y[:-1,:]*np.pi/180.0)*np.cos(x[:-1,:]*np.pi/180.0)
-    xmidp = xmidp + 0.5*np.cos(y[1:,:]*np.pi/180.0)*np.cos(x[1:,:]*np.pi/180.0)
-    ymidp = 0.5*np.cos(y[:-1,:]*np.pi/180.0)*np.sin(x[:-1,:]*np.pi/180.0)
-    ymidp = ymidp + 0.5*np.cos(y[1:,:]*np.pi/180.0)*np.sin(x[1:,:]*np.pi/180.0)
-    zmidp = 0.5*(np.sin(y[:-1,:]*np.pi/180.0)+np.sin(y[1:,:]*np.pi/180.0))
-    latmidp = np.arctan2(zmidp, np.sqrt(xmidp*xmidp+ymidp*ymidp))*180.0/np.pi
-    lonmidp = np.arctan2(ymidp, xmidp)*180.0/np.pi
 
-    x_ind = np.round_((lonmidp+180.0)/dx).astype(int)
+    x_ind = np.round_((x[:-1,:]+180.0)/dx).astype(int)
     x_ind[x_ind==nx] = 0
     x_ind = np.where(x[1:,:]==-1000.0, -1000, x_ind)
-    y_ind = np.round_((latmidp+90.0)/dy).astype(int)
+    y_ind = np.round_((y[:-1,:]+90.0)/dy).astype(int)
     y_ind = np.where(x[1:,:]==-1000.0, -1000, y_ind)
     
     return x_ind, y_ind
 
 
-# --- FUNCTION discount_sod08
-# The linear discounting from Sodemann et al., (2008) is used to compute the contributions for each
-# parcel and time.
-# The contribution is given by the relative increment in humidity.
-# The array with shape ntimes x numpart f with these contributions is returned.
-@jit(nopython=True)
-def discount_sod08(dq, q, ind_evap, ind_prec):
+# --- FUNCTION discount_db99
+# Given the mid point parcel positions in x_ind and y_ind (relative to
+# the grid we are using), together with the precipitable water and evaporation
+# in the same grid cells, the backwards DB99 method is applied (such as in the
+# UTRACK methodology), to compute the contributions for each parcel and time.
+# The array with shape ntimes x numpart f with these contributions is returned
+def discount_db99(tcw, evap):
 
-    ntimes, numpart = q.shape
+    ntimes, numpart = tcw.shape 
 
-    f =  np.zeros((ntimes, numpart))
-    f[0,:] = np.where(q[-1,:]>0, q[-1,:], 0.0)
+    # Indices for evaporation
+    ind_evap = evap[:-1,:]>0
+    tcw[tcw==0.0] = np.nan
+    fr = np.where(ind_evap==True, np.nan_to_num(997.0*evap[:-1,:]/tcw[:-1,:]), 0)
 
-    for t in range(1, ntimes-1, 1):
-
-        ind_gain = ind_evap[-t, :]==True
-        f[t, ind_gain] = dq[-t, ind_gain]
-        ind_loss = ind_prec[-t,:]==True
-        f[t,ind_loss] = 0
-        qfactor = np.where(ind_loss==True, q[-(t+1),:]/q[-t,:], 1)
-
-        for s in range(t):
-            f_old = f[s,:]
-            f[s,:] = f_old*qfactor
+    # Water mass parcels already have at the trajectory beginning and
+    # initialization of the moisture contribution proportion
+    f = np.zeros((ntimes,numpart))       
+    f[0,:] = 1.
+    
+    # Loop over times previous to precipitation
+    # When we start at step 0 we are computing the moisture sources for all the 
+    # water in the atmospheric column in the last time
+    for t in range(0, ntimes-1, 1):
+        #
+        # Select parcels gaining moisture at this time, and attribute
+        ind_gain = ind_evap[t,:]
+        frr = fr[t, ind_gain]
+        frr = frr/(1+frr)
+        f[t+1,ind_gain] = f[0,ind_gain]*frr 
+        f[0,ind_gain] = f[0,ind_gain]*(1-frr)
 
     return f
 
@@ -107,13 +164,13 @@ def compute_ms_field(x_ind, y_ind, f, dx, dy):
 
     for j in range(numpart):
         for t in range(1, ntimes, 1):
-            if x_ind[-t,j]>=0:
-                ms[x_ind[-t,j], y_ind[-t,j]] = ms[x_ind[-t,j], y_ind[-t,j]] + f[t-1,j]
+            if x_ind[t-1,j]>=0:
+                ms[x_ind[t-1,j], y_ind[t-1,j]] = ms[x_ind[t-1,j], y_ind[t-1,j]] + f[t,j]
             else:
-                if y_ind[-(t-1), j]>ny_border:
-                    ms_north = ms_north+f[-1,j]
+                if y_ind[t-2, j]>ny_border:
+                    ms_north = ms_north+f[0,j]
                 else:
-                    ms_south = ms_south+f[-1,j]
+                    ms_south = ms_south+f[0,j]
 
     return ms, ms_north, ms_south
 
