@@ -6,9 +6,9 @@ Trajectories from FLEXPART or FLEXPART-WRF are supposed to be stored in a HDF5 f
 - [:,:,3] is the boundary layer height
 - [:,:,4] is the specific humidity
 - [:,:,5] is the relative humidity
-Another dataset, "other_data", stores the parcel mass for the specific FLEXPART simulation. The path to these trajectories is given in the namelist. Additionally, evaporation,
-precipitable water and precipitation are supposed to be in another directory, path_data. The corresponding files are readed using the function interpol_tcw_evap_complete, the name
-of the files and variables in them may need to be adjusted.
+To create this dataset from FLEXPART binary output, the script convert-to-h5.py in utils/ may be used. Another dataset, "other_data", stores the parcel mass for the specific FLEXPART simulation.
+The path to these trajectories is given in the namelist. Additionally, evaporation, precipitable water and precipitation are supposed to be in another directory, path_data. The corresponding files
+are readed using the function interpol_tcw_evap_complete, the name of the files and variables in them may need to be adjusted.
 
 To reproduce the results of the manuscript, the moisture source field needs to be calculated for each time step (1 hour, 3 hours or 6 hours) in the precipitation event, accumulating along the
-time dimension and scaling the resulting field to the precipitation observed.
+time dimension and scaling the resulting field to the precipitation observed. To compute the precipitation fractions, the script compute-precip-fractions.py in utils/ may be used.
